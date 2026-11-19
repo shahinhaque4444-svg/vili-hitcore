@@ -1,0 +1,83 @@
+name: vili-hitcore
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vili-kernel-main
+  cancel-in-progress: false
+
+env:
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/llvm-r522817/clang-r522817.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /usr/local/lib/android/sdk/ndk "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h /
+
+      - name: deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bc bison build-essential flex libssl-dev libelf-dev zip unzip lz4 python3 curl
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - name: cache clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/clang
+          key: clang-r522817-v1
+
+      - name: clang r522817
+        run: |
+          if [ ! -x "$RUNNER_TEMP/clang/bin/clang" ]; then
+            mkdir -p "$RUNNER_TEMP/clang"
+            curl -sL "$CLANG_URL" | tar -xz -C "$RUNNER_TEMP/clang"
+          fi
+          sudo mkdir -p /opt/kernel-tools
+          sudo ln -sfn "$RUNNER_TEMP/clang" /opt/kernel-tools/clang-r522817
+          /opt/kernel-tools/clang-r522817/bin/clang --version
+
+      - name: defconfig
+        run: bash build_vili_defconfig.sh
+
+      - name: build
+        run: bash build_vili.sh build
+
+      - name: package
+        run: bash package_vili.sh "gha-${{ github.run_number }}"
+
+      - name: result
+        run: |
+          ls -lh out/*.zip out/arch/arm64/boot/Image
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vili-hitcore-${{ github.run_number }}
+          path: out/vili-hitcore-*.zip
+          retention-days: 30
+
+      - name: release
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          files: out/vili-hitcore-*.zip
