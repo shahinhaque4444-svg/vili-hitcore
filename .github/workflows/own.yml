@@ -1,0 +1,150 @@
+name: vili-own
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/llvm-r522817/clang-r522817.tar.gz
+  KERNEL_REPO: https://github.com/aospa-vili/kernel_xiaomi_sm8350
+  KERNEL_BRANCH: "17"
+  KSU_TAG: v3.4.2
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /usr/local/lib/android/sdk/ndk "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h /
+
+      - name: deps
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
+            bc bison build-essential flex libssl-dev libelf-dev zip unzip lz4 python3 curl
+          if ! sudo swapon --show | grep -q .; then
+            sudo fallocate -l 8G /swapfile2
+            sudo chmod 600 /swapfile2
+            sudo mkswap /swapfile2
+            sudo swapon /swapfile2
+          fi
+          free -g; df -h /
+
+      - name: cache clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/clang
+          key: clang-r522817-v1
+
+      - name: clang r522817
+        run: |
+          if [ ! -x "$RUNNER_TEMP/clang/bin/clang" ]; then
+            mkdir -p "$RUNNER_TEMP/clang"
+            curl -sL "$CLANG_URL" | tar -xz -C "$RUNNER_TEMP/clang"
+          fi
+          sudo mkdir -p /opt/kernel-tools
+          sudo ln -sfn "$RUNNER_TEMP/clang" /opt/kernel-tools/clang-r522817
+          /opt/kernel-tools/clang-r522817/bin/clang --version
+
+      - name: toolchain env
+        run: echo "/opt/kernel-tools/clang-r522817/bin" >> "$GITHUB_PATH"
+
+      - name: clone kernel
+        run: |
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          cd kernel
+          git log --oneline -1
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile | tr '\n' ' '; echo
+
+      - name: kernelsu-next ${{ env.KSU_TAG }}
+        run: |
+          cd kernel
+          sh ./setup.sh "$KSU_TAG"
+          test -e drivers/kernelsu
+          grep -n kernelsu drivers/Makefile
+          grep -n kernelsu drivers/Kconfig
+          grep -E '^(config|bool|tristate)' drivers/kernelsu/Kconfig | head -20
+
+      - name: config
+        run: |
+          set -euo pipefail
+          cp config/vili_rom_defconfig kernel/arch/arm64/configs/vili_ollie_defconfig
+          cat > kernel/tune.config <<'EOF'
+CONFIG_TCP_CONG_BBR=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_NET_SCH_FQ=y
+CONFIG_DEFAULT_FQ_CODEL=y
+CONFIG_DEFAULT_TCP_CONG="bbr"
+CONFIG_PSI=y
+CONFIG_PSI_DEFAULT_DISABLED=n
+CONFIG_WIREGUARD=y
+CONFIG_SCHEDSTATS=n
+CONFIG_DEBUG_INFO=n
+CONFIG_DEBUG_INFO_DWARF4=n
+CONFIG_SLUB_DEBUG=n
+CONFIG_MAGIC_SYSRQ=y
+EOF
+          cd kernel
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 vili_ollie_defconfig
+          cat tune.config >> out/.config
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_KSU_DEBUG=n" >> out/.config
+          echo "CONFIG_KSU_DISABLE_MANAGER=n" >> out/.config
+          echo "CONFIG_KSU_DISABLE_POLICY=n" >> out/.config
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          grep -E '^CONFIG_(KSU|KSU_[A-Z_]*|LOCALVERSION|HZ|MODULES|LTO_CLANG|THINLTO|CFI_CLANG|TCP_CONG_BBR|DEFAULT_TCP_CONG|PSI|WIREGUARD|SLUB_DEBUG|DEBUG_INFO)=' out/.config | sort
+
+      - name: patch built-in wlan symbol clashes
+        run: |
+          set -uo pipefail
+          cd kernel
+          grep -rl 'nl80211hdr_put' drivers/staging/ 2>/dev/null | xargs -r sed -i 's/nl80211hdr_put/qca_nl80211hdr_put/g'
+          grep -rl 'ipa_is_ready' drivers/staging/qcacld-3.0/ 2>/dev/null | xargs -r sed -i 's/ipa_is_ready/ipa_is_ready_qca/g'
+          echo "patched"
+
+      - name: build
+        run: |
+          cd kernel
+          make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image dtbs
+          ls -lh out/arch/arm64/boot/Image
+
+      - name: package
+        run: |
+          set -euo pipefail
+          AK=out/ak3
+          rm -rf "$AK"
+          cp -a anykernel "$AK"
+          cp kernel/out/arch/arm64/boot/Image "$AK/Image"
+          DTB=$(find kernel/out/arch/arm64/boot/dts/vendor/qcom -name 'lahaina-v2.1.dtb' | head -1)
+          DTO=$(find kernel/out/arch/arm64/boot/dts/vendor/qcom -name 'vili*overlay.dtbo' | head -1)
+          test -n "$DTB" && test -n "$DTO"
+          cp "$DTB" "$AK/dtb"
+          cp "$DTO" "$AK/dtbo.img"
+          sed -i 's/^do.modules=1/do.modules=0/' "$AK/anykernel.sh"
+          sed -i 's/^kernel.string=.*/kernel.string=5.4.302-qgki + KernelSU-Next v3.4.2 (own build)/' "$AK/anykernel.sh"
+          (cd "$AK" && zip -r9q ../vili-own-gha-${{ github.run_number }}.zip .)
+          ls -lh out/*.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vili-own-${{ github.run_number }}
+          path: out/vili-own-gha-*.zip
+          retention-days: 30
+
+      - name: release
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: own-${{ github.run_number }}
+          files: out/vili-own-gha-*.zip
