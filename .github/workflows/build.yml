@@ -33,12 +33,16 @@ jobs:
 
       - name: deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bc bison build-essential flex libssl-dev libelf-dev zip unzip lz4 python3 curl
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
+            bc bison build-essential flex libssl-dev libelf-dev zip unzip lz4 python3 curl
+          if ! sudo swapon --show | grep -q .; then
+            sudo fallocate -l 8G /swapfile2
+            sudo chmod 600 /swapfile2
+            sudo mkswap /swapfile2
+            sudo swapon /swapfile2
+          fi
+          free -g; df -h /
 
       - name: cache clang
         uses: actions/cache@v4
