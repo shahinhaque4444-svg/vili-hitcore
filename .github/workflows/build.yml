@@ -1,15 +1,9 @@
-name: vili-hitcore
+name: vili-rom-ksu
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 permissions:
   contents: write
-
-concurrency:
-  group: vili-kernel-main
-  cancel-in-progress: false
 
 env:
   CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/llvm-r522817/clang-r522817.tar.gz
@@ -60,28 +54,47 @@ jobs:
           sudo ln -sfn "$RUNNER_TEMP/clang" /opt/kernel-tools/clang-r522817
           /opt/kernel-tools/clang-r522817/bin/clang --version
 
-      - name: defconfig
-        run: bash build_vili_defconfig.sh
+      - name: config (device dump + KernelSU)
+        run: |
+          cp config/vili_rom_defconfig arch/arm64/configs/vili_rom_defconfig
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 vili_rom_defconfig
+          ./scripts/config --file out/.config \
+            -e KSU -e KSU_MANUAL_HOOK \
+            -d KSU_TRACEPOINT_HOOK -d KSU_SUSFS -d KSU_KPROBES_HOOK
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          grep -E '^CONFIG_KSU|^CONFIG_LOCALVERSION=|^CONFIG_HZ=|^CONFIG_MODULES=' out/.config
 
       - name: build
-        run: bash build_vili.sh build
+        run: |
+          make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image dtbs
+          ls -lh out/arch/arm64/boot/Image
 
       - name: package
-        run: bash package_vili.sh "gha-${{ github.run_number }}"
-
-      - name: result
         run: |
-          ls -lh out/*.zip out/arch/arm64/boot/Image
+          set -euo pipefail
+          AK=out/ak3
+          rm -rf "$AK"
+          cp -a anykernel "$AK"
+          cp out/arch/arm64/boot/Image "$AK/Image"
+          DTB=$(find out/arch/arm64/boot/dts/vendor/qcom -name 'lahaina-v2.1.dtb' | head -1)
+          DTO=$(find out/arch/arm64/boot/dts/vendor/qcom -name 'vili*overlay.dtbo' | head -1)
+          test -n "$DTB" && test -n "$DTO"
+          cp "$DTB" "$AK/dtb"
+          cp "$DTO" "$AK/dtbo.img"
+          sed -i 's/^do.modules=1/do.modules=0/' "$AK/anykernel.sh"
+          sed -i 's/^kernel.string=.*/kernel.string=5.4.302-qgki + KernelSU (vili)/' "$AK/anykernel.sh"
+          (cd "$AK" && zip -r9q ../vili-ksu-gha-${{ github.run_number }}.zip .)
+          ls -lh out/*.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: vili-hitcore-${{ github.run_number }}
-          path: out/vili-hitcore-*.zip
+          name: vili-ksu-${{ github.run_number }}
+          path: out/vili-ksu-gha-*.zip
           retention-days: 30
 
       - name: release
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          files: out/vili-hitcore-*.zip
+          tag_name: ksu-${{ github.run_number }}
+          files: out/vili-ksu-gha-*.zip
