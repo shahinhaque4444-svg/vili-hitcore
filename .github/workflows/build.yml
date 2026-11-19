@@ -67,6 +67,13 @@ jobs:
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
           grep -E '^CONFIG_KSU|^CONFIG_LOCALVERSION=|^CONFIG_HZ=|^CONFIG_MODULES=' out/.config
 
+      - name: patch built-in wlan symbol clashes
+        run: |
+          set -euo pipefail
+          grep -rl 'nl80211hdr_put' drivers/staging/ | xargs sed -i 's/nl80211hdr_put/qca_nl80211hdr_put/g'
+          grep -rl 'ipa_is_ready' drivers/staging/qcacld-3.0/ | xargs sed -i 's/ipa_is_ready/ipa_is_ready_qca/g'
+          grep -rn 'qca_nl80211hdr_put' drivers/staging/ | head -5
+
       - name: build
         run: |
           make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image dtbs
