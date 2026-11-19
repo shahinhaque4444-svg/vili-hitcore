@@ -54,6 +54,9 @@ jobs:
           sudo ln -sfn "$RUNNER_TEMP/clang" /opt/kernel-tools/clang-r522817
           /opt/kernel-tools/clang-r522817/bin/clang --version
 
+      - name: toolchain env
+        run: echo "/opt/kernel-tools/clang-r522817/bin" >> "$GITHUB_PATH"
+
       - name: config (device dump + KernelSU)
         run: |
           cp config/vili_rom_defconfig arch/arm64/configs/vili_rom_defconfig
